@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""
+Web Server Log Analyzer
+Analiza logs de Apache/Nginx para detectar patrones de tráfico sospechoso
+Autor: Ricardo Hervey Estrada García
+"""
+
+import re
+import json
+import pandas as pd
+from datetime import datetime
+import argparse
+from collections import Counter, defaultdict
+import ipaddress
+
+class LogAnalyzer:
+    def __init__(self):
+        self.suspicious_patterns = [
+            r'\.\./',  # Directory traversal
+            r'<script',  # XSS attempts
+            r'union.*select',  # SQL injection
+            r'cmd=',  # Command injection
+            r'eval\(',  # Code injection
+            r'/etc/passwd',  # System file access
+        ]
+        
+        self.suspicious_user_agents = [
+            'sqlmap',
+            'nikto',
+            'nmap',
+            'burpsuite',
+            'gobuster',
+            'dirb'
+        ]
+    
+    def parse_apache_log(self, log_line):
+        """Parse Apache Common Log Format"""
+        pattern = r'(\d+\.\d+\.\d+\.\d+) - - \[(.*?)\] "(.*?)" (\d+) (\d+) "(.*?)" "(.*?)"'
+        match = re.match(pattern, log_line)
+        
+        if match:
+            return {
+                'ip': match.group(1),
+                'timestamp': match.group(2),
+                'request': match.group(3),
+                'status_code': int(match.group(4)),
+                'size': int(match.group(5)) if match.group(5) != '-' else 0,
+                'referer': match.group(6),
+                'user_agent': match.group(7)
+            }
+        return None
+    
+    def is_suspicious_request(self, request, user_agent):
+        """Detect suspicious patterns in requests"""
+        request_lower = request.lower()
+        user_agent_lower = user_agent.lower()
+        
+        # Check for suspicious patterns
+        for pattern in self.suspicious_patterns:
+            if re.search(pattern, request_lower):
+                return True
+        
+        # Check for suspicious user agents
+        for agent in self.suspicious_user_agents:
+            if agent in user_agent_lower:
+                return True
+        
+        return False
+    
+    def analyze_logs(self, log_file_path):
+        """Analyze log file and generate report"""
+        logs = []
+        suspicious_entries = []
+        ip_counter = Counter()
+        status_counter = Counter()
+        
+        try:
+            with open(log_file_path, 'r', encoding='utf-8') as file:
+                for line_num, line in enumerate(file, 1):
+                    parsed = self.parse_apache_log(line.strip())
+                    if parsed:
+                        logs.append(parsed)
+                        ip_counter[parsed['ip']] += 1
+                        status_counter[parsed['status_code']] += 1
+                        
+                        if self.is_suspicious_request(parsed['request'], parsed['user_agent']):
+                            suspicious_entries.append({**parsed, 'line_number': line_num})
+        
+        except FileNotFoundError:
+            print(f"Error: File {log_file_path} not found")
+            return None
+        
+        return {
+            'total_requests': len(logs),
+            'unique_ips': len(ip_counter),
+            'suspicious_requests': len(suspicious_entries),
+            'top_ips': ip_counter.most_common(10),
+            'status_codes': dict(status_counter),
+            'suspicious_details': suspicious_entries[:20]  # Top 20 suspicious
+        }
+    
+    def generate_report(self, analysis_result, output_file='security_report.json'):
+        """Generate JSON report"""
+        report = {
+            'analysis_timestamp': datetime.now().isoformat(),
+            'summary': {
+                'total_requests': analysis_result['total_requests'],
+                'unique_ips': analysis_result['unique_ips'],
+                'suspicious_requests': analysis_result['suspicious_requests'],
+                'risk_level': 'HIGH' if analysis_result['suspicious_requests'] > 100 else 
+                           'MEDIUM' if analysis_result['suspicious_requests'] > 10 else 'LOW'
+            },
+            'details': analysis_result
+        }
+        
+        with open(output_file, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        print(f"Reporte generado: {output_file}")
+        return report
+
+def main():
+    parser = argparse.ArgumentParser(description='Analyze web server logs for suspicious activity')
+    parser.add_argument('log_file', help='Path to the log file to analyze')
+    parser.add_argument('-o', '--output', default='security_report.json', 
+                       help='Output file for the report')
+    
+    args = parser.parse_args()
+    
+    analyzer = LogAnalyzer()
+    print(f"Analizando archivo de logs: {args.log_file}")
+    
+    result = analyzer.analyze_logs(args.log_file)
+    if result:
+        report = analyzer.generate_report(result, args.output)
+        
+        # Print summary
+        print("\n=== RESUMEN DEL ANÁLISIS ===")
+        print(f"Total de requests: {result['total_requests']}")
+        print(f"IPs únicas: {result['unique_ips']}")
+        print(f"Requests sospechosos: {result['suspicious_requests']}")
+        print(f"Nivel de riesgo: {report['summary']['risk_level']}")
+
+if __name__ == "__main__":
+    main()
